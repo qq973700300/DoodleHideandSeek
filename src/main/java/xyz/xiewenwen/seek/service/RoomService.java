@@ -1,9 +1,12 @@
 package xyz.xiewenwen.seek.service;
 
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
 import org.springframework.stereotype.Service;
@@ -19,6 +22,7 @@ import xyz.xiewenwen.seek.model.PlayerRole;
 public class RoomService {
 
 	private static final int MAX_PLAYERS = 8;
+	private static final long STALE_PLAYER_GRACE_MS = 15_000;
 	private static final String CODE_CHARS = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 	private final Map<String, GameRoom> rooms = new ConcurrentHashMap<>();
@@ -26,30 +30,37 @@ public class RoomService {
 	private final Map<String, String> sessionPlayers = new ConcurrentHashMap<>();
 	private final Random random = new Random();
 
-	public GameRoom createRoom(String hostName) {
+	public GameRoom createRoom(String hostName, String clientId) {
+		removeClientFromAllRooms(clientId);
 		String roomId = generateRoomCode();
 		String playerId = java.util.UUID.randomUUID().toString();
 		GameRoom room = new GameRoom(roomId, playerId);
-		Player host = new Player(playerId, sanitizeName(hostName), true);
+		Player host = new Player(playerId, sanitizeName(hostName), true, clientId);
 		spawnPlayer(host);
 		room.getPlayers().add(host);
 		rooms.put(roomId, room);
 		return room;
 	}
 
-	public GameRoom joinRoom(String roomId, String playerName) {
+	public GameRoom joinRoom(String roomId, String playerName, String clientId) {
 		GameRoom room = rooms.get(roomId.toUpperCase());
 		if (room == null) {
 			throw new IllegalArgumentException("房间不存在");
 		}
+		removeClientFromOtherRooms(clientId, room.getId());
 		if (room.getPhase() != GamePhase.LOBBY) {
 			throw new IllegalStateException("游戏已开始，无法加入");
+		}
+		Player existing = findPlayerByClientId(room, clientId);
+		if (existing != null) {
+			resetPlayerForLobby(existing, sanitizeName(playerName));
+			return room;
 		}
 		if (room.getPlayers().size() >= MAX_PLAYERS) {
 			throw new IllegalStateException("房间已满");
 		}
 		String playerId = java.util.UUID.randomUUID().toString();
-		Player player = new Player(playerId, sanitizeName(playerName), false);
+		Player player = new Player(playerId, sanitizeName(playerName), false, clientId);
 		spawnPlayer(player);
 		room.getPlayers().add(player);
 		return room;
@@ -64,9 +75,13 @@ public class RoomService {
 	}
 
 	public List<RoomListItem> listOpenRooms() {
+		purgeStaleLobbyPlayers(getConnectedPlayerIds());
 		List<RoomListItem> result = new ArrayList<>();
 		for (GameRoom room : rooms.values()) {
 			if (room.getPhase() != GamePhase.LOBBY) {
+				continue;
+			}
+			if (room.getPlayers().isEmpty()) {
 				continue;
 			}
 			if (room.getPlayers().size() >= MAX_PLAYERS) {
@@ -80,9 +95,20 @@ public class RoomService {
 		return result;
 	}
 
+	public Set<String> getConnectedPlayerIds() {
+		return new HashSet<>(sessionPlayers.values());
+	}
+
 	public void bindSession(String sessionId, String roomId, String playerId) {
 		sessionRooms.put(sessionId, roomId.toUpperCase());
 		sessionPlayers.put(sessionId, playerId);
+		GameRoom room = getRoom(roomId);
+		if (room != null) {
+			Player player = room.findPlayer(playerId);
+			if (player != null) {
+				player.setJoinedAt(System.currentTimeMillis());
+			}
+		}
 	}
 
 	public void unbindSession(String sessionId) {
@@ -171,10 +197,65 @@ public class RoomService {
 		if (target == null) {
 			throw new IllegalArgumentException("玩家不存在");
 		}
-		room.getPlayers().removeIf(p -> p.getId().equals(targetId));
+		removePlayer(room, targetId);
+	}
+
+	public synchronized boolean leaveRoom(String roomId, String playerId, String clientId) {
+		GameRoom room = rooms.get(roomId.toUpperCase());
+		if (room == null) {
+			return true;
+		}
+		Set<String> toRemove = new LinkedHashSet<>();
+		if (playerId != null && !playerId.isBlank()) {
+			toRemove.add(playerId);
+		}
+		if (clientId != null && !clientId.isBlank()) {
+			for (Player player : room.getPlayers()) {
+				if (clientId.equals(player.getClientId())) {
+					toRemove.add(player.getId());
+				}
+			}
+		}
+		for (String id : toRemove) {
+			removePlayer(room, id);
+			room = rooms.get(roomId.toUpperCase());
+			if (room == null) {
+				return true;
+			}
+		}
+		return !rooms.containsKey(room.getId());
+	}
+
+	public synchronized void purgeStaleLobbyPlayers(Set<String> connectedPlayerIds) {
+		long now = System.currentTimeMillis();
+		for (String roomId : new ArrayList<>(rooms.keySet())) {
+			GameRoom room = rooms.get(roomId);
+			if (room == null || room.getPhase() != GamePhase.LOBBY) {
+				continue;
+			}
+			List<String> staleIds = new ArrayList<>();
+			for (Player player : room.getPlayers()) {
+				if (connectedPlayerIds.contains(player.getId())) {
+					continue;
+				}
+				if (now - player.getJoinedAt() >= STALE_PLAYER_GRACE_MS) {
+					staleIds.add(player.getId());
+				}
+			}
+			for (String id : staleIds) {
+				removePlayer(room, id);
+				room = rooms.get(roomId);
+				if (room == null) {
+					break;
+				}
+			}
+		}
 	}
 
 	public synchronized void removePlayer(GameRoom room, String playerId) {
+		if (room.findPlayer(playerId) == null) {
+			return;
+		}
 		room.getPlayers().removeIf(p -> p.getId().equals(playerId));
 		if (room.getPlayers().isEmpty()) {
 			rooms.remove(room.getId());
@@ -215,8 +296,8 @@ public class RoomService {
 		player.setY(clamp(y, radius, GameRoom.CANVAS_HEIGHT - radius));
 	}
 
-	public synchronized void camouflagePlayer(GameRoom room, String playerId, String color) {
-		if (room.getPhase() != GamePhase.HIDING) {
+	public synchronized void camouflagePlayer(GameRoom room, String playerId, String color, String disguise) {
+		if (room.getPhase() != GamePhase.HIDING && room.getPhase() != GamePhase.SEEKING) {
 			return;
 		}
 		Player player = room.findPlayer(playerId);
@@ -224,6 +305,9 @@ public class RoomService {
 			return;
 		}
 		player.setColor(normalizeColor(color));
+		if (disguise != null && !disguise.isBlank() && isAllowedDisguise(disguise)) {
+			player.setDisguise(disguise.trim());
+		}
 	}
 
 	public synchronized Player seekShoot(GameRoom room, String seekerId, String targetPlayerId) {
@@ -312,6 +396,7 @@ public class RoomService {
 		for (Player player : room.getPlayers()) {
 			player.setFound(false);
 			player.setColor("#FFFFFF");
+			player.setDisguise(null);
 			player.setEntered(true);
 			if (!player.isHost()) {
 				player.setReady(false);
@@ -378,10 +463,84 @@ public class RoomService {
 		return Math.max(min, Math.min(max, value));
 	}
 
+	private static final Set<String> ALLOWED_DISGUISES = Set.of(
+			"pine_tree", "round_tree", "bush", "rock_cluster",
+			"crate", "barrel", "hay_bale", "picnic_table", "park_bench",
+			"shed", "gazebo", "fountain", "playground_slide", "sandbox", "bus_stop",
+			"car", "sofa", "bookshelf", "flower_bed", "sign_post",
+			"low_wall", "colored_block", "fence", "lamp_post");
+
+	private boolean isAllowedDisguise(String disguise) {
+		return ALLOWED_DISGUISES.contains(disguise);
+	}
+
 	private String normalizeColor(String color) {
 		if (color == null || !color.matches("#?[0-9A-Fa-f]{6}")) {
 			return "#FFFFFF";
 		}
 		return color.startsWith("#") ? color.toUpperCase() : "#" + color.toUpperCase();
+	}
+
+	private Player findPlayerByClientId(GameRoom room, String clientId) {
+		if (clientId == null || clientId.isBlank()) {
+			return null;
+		}
+		return room.getPlayers().stream()
+				.filter(p -> clientId.equals(p.getClientId()))
+				.findFirst()
+				.orElse(null);
+	}
+
+	public Player findPlayerByClientId(String roomId, String clientId) {
+		GameRoom room = rooms.get(roomId.toUpperCase());
+		if (room == null) {
+			return null;
+		}
+		return findPlayerByClientId(room, clientId);
+	}
+
+	private void removeClientFromAllRooms(String clientId) {
+		if (clientId == null || clientId.isBlank()) {
+			return;
+		}
+		for (String id : new ArrayList<>(rooms.keySet())) {
+			GameRoom room = rooms.get(id);
+			if (room == null) {
+				continue;
+			}
+			Player existing = findPlayerByClientId(room, clientId);
+			if (existing != null) {
+				removePlayer(room, existing.getId());
+			}
+		}
+	}
+
+	private void removeClientFromOtherRooms(String clientId, String exceptRoomId) {
+		if (clientId == null || clientId.isBlank()) {
+			return;
+		}
+		String except = exceptRoomId.toUpperCase();
+		for (String id : new ArrayList<>(rooms.keySet())) {
+			if (id.equals(except)) {
+				continue;
+			}
+			GameRoom room = rooms.get(id);
+			if (room == null) {
+				continue;
+			}
+			Player existing = findPlayerByClientId(room, clientId);
+			if (existing != null) {
+				removePlayer(room, existing.getId());
+			}
+		}
+	}
+
+	private void resetPlayerForLobby(Player player, String name) {
+		player.setName(name);
+		player.setEntered(false);
+		player.setJoinedAt(System.currentTimeMillis());
+		if (!player.isHost()) {
+			player.setReady(false);
+		}
 	}
 }

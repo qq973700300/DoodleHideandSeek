@@ -5,8 +5,8 @@ import java.util.List;
 
 public class GameRoom {
 
-	public static final int CANVAS_WIDTH = 800;
-	public static final int CANVAS_HEIGHT = 500;
+	public static final int CANVAS_WIDTH = 3200;
+	public static final int CANVAS_HEIGHT = 2000;
 	public static final int HIDING_SECONDS = 20;
 	public static final int SEEKING_SECONDS = 60;
 	public static final double PLAYER_RADIUS = 22;

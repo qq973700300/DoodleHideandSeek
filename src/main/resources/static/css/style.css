@@ -383,3 +383,102 @@ input:focus {
     grid-template-columns: 1fr;
   }
 }
+
+/* 进入游戏：全屏沉浸式布局 */
+body.in-game {
+  overflow: hidden;
+}
+
+body.in-game #app {
+  max-width: none;
+  margin: 0;
+  padding: 0;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
+body.in-game .hero {
+  display: none;
+}
+
+#game-panel:not(.hidden) {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: #0a0e18;
+}
+
+#game-panel:not(.hidden) .game-layout {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: block;
+}
+
+#game-panel:not(.hidden) .canvas-wrap {
+  position: absolute;
+  inset: 0;
+  max-height: none;
+  aspect-ratio: auto;
+  border: none;
+  border-radius: 0;
+  box-shadow: none;
+}
+
+#game-panel:not(.hidden) .toolbar {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 12;
+  margin: 0;
+  padding: 10px 16px;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0.72) 0%, rgba(0, 0, 0, 0.35) 70%, transparent 100%);
+  pointer-events: none;
+}
+
+#game-panel:not(.hidden) .toolbar > * {
+  pointer-events: auto;
+}
+
+#game-panel:not(.hidden) .sidebar {
+  position: absolute;
+  top: 52px;
+  right: 12px;
+  bottom: 12px;
+  z-index: 11;
+  width: 240px;
+  max-height: none;
+  overflow-y: auto;
+  background: rgba(10, 16, 30, 0.82);
+  backdrop-filter: blur(10px);
+}
+
+#game-panel:not(.hidden) #game-error {
+  position: absolute;
+  left: 50%;
+  bottom: 56px;
+  transform: translateX(-50%);
+  z-index: 13;
+  margin: 0;
+  padding: 8px 14px;
+  border-radius: 8px;
+  background: rgba(80, 0, 0, 0.75);
+}
+
+#game-panel:not(.hidden) .hint-bar {
+  padding-bottom: max(10px, env(safe-area-inset-bottom));
+}
+
+@media (max-width: 768px) {
+  #game-panel:not(.hidden) .sidebar {
+    top: auto;
+    left: 12px;
+    right: 12px;
+    bottom: 48px;
+    width: auto;
+    max-height: 32vh;
+  }
+}

@@ -1,17 +1,26 @@
 import * as THREE from 'three';
+import { buildEnvironment } from './scene-build.js';
+import { DISGUISE_NAMES, resolvePropType, sampleMeshColor } from './scene-build.js';
+import { createHumanoid, createDisguiseVisual, getHumanoidVariant } from './player-models.js';
 
-const WORLD_WIDTH = 800;
-const WORLD_DEPTH = 500;
+const WORLD_WIDTH = 3200;
+const WORLD_DEPTH = 2000;
 const PLAYER_RADIUS = 22;
-const ROOM_W = 32;
-const ROOM_D = 20;
+const ROOM_W = 128;
+const ROOM_D = 80;
 const EYE_HEIGHT = 1.55;
 const SHOOT_COOLDOWN_MS = 350;
 const TP_DISTANCE = 5.5;
+const GAME_BASE = location.pathname === '/game' || location.pathname.startsWith('/game/') ? '/game' : '';
+
+function apiUrl(path) {
+  return `${GAME_BASE}${path}`;
+}
 
 const state = {
   roomId: null,
   playerId: null,
+  clientId: getClientId(),
   isHost: false,
   snapshot: null,
   ws: null,
@@ -22,7 +31,8 @@ const state = {
   yaw: 0,
   pitch: 0,
   lastShot: 0,
-  previewAngle: 0
+  previewAngle: 0,
+  intentionalLeave: false
 };
 
 const canvas = document.getElementById('game-canvas');
@@ -60,29 +70,66 @@ let roomListTimer = null;
 document.getElementById('create-room-btn').addEventListener('click', createRoom);
 document.getElementById('join-room-btn').addEventListener('click', () => joinRoomById(roomCodeInput.value.trim().toUpperCase()));
 refreshRoomsBtn.addEventListener('click', refreshRoomList);
-document.getElementById('leave-btn').addEventListener('click', leaveGame);
+document.getElementById('leave-btn').addEventListener('click', () => { leaveGame(); });
 enterBtn.addEventListener('click', enterScene);
 readyBtn.addEventListener('click', toggleReady);
 startBtn.addEventListener('click', () => sendMessage({ type: 'START', roomId: state.roomId, playerId: state.playerId }));
 nextRoundBtn.addEventListener('click', () => sendMessage({ type: 'NEXT_ROUND', roomId: state.roomId, playerId: state.playerId }));
 
 window.addEventListener('keydown', (e) => {
-  state.keys[e.key.toLowerCase()] = true;
-  if (e.key.toLowerCase() === 'e') {
+  if (e.target.matches('input, textarea')) return;
+  const key = e.key.toLowerCase();
+  if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+    e.preventDefault();
+  }
+  state.keys[key] = true;
+  if (key === 'e') {
     sampleColorAtCrosshair();
   }
 });
-window.addEventListener('keyup', (e) => { state.keys[e.key.toLowerCase()] = false; });
+window.addEventListener('keyup', (e) => {
+  if (e.target.matches('input, textarea')) return;
+  state.keys[e.key.toLowerCase()] = false;
+});
 canvas.addEventListener('click', onCanvasClick);
 document.addEventListener('mousedown', onMouseDown);
 document.addEventListener('mousemove', onMouseMove);
 document.addEventListener('pointerlockchange', onPointerLockChange);
 window.addEventListener('resize', onResize);
+function buildLeaveUrl(roomId, playerId, clientId) {
+  const params = new URLSearchParams({ clientId });
+  if (playerId) {
+    params.set('playerId', playerId);
+  }
+  return apiUrl(`/api/rooms/${encodeURIComponent(roomId)}/leave?${params}`);
+}
+
+function notifyPageLeave() {
+  if (!state.roomId || !state.clientId || state.intentionalLeave) {
+    return;
+  }
+  const url = buildLeaveUrl(state.roomId, state.playerId, state.clientId);
+  fetch(url, { method: 'POST', keepalive: true }).catch(() => {});
+  navigator.sendBeacon(url);
+}
+
+window.addEventListener('pagehide', notifyPageLeave);
+window.addEventListener('beforeunload', notifyPageLeave);
 startLobbyRoomListPolling();
+
+function getClientId() {
+  const key = 'doodle-client-id';
+  let id = sessionStorage.getItem(key);
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem(key, id);
+  }
+  return id;
+}
 
 async function refreshRoomList() {
   try {
-    const response = await fetch('/api/rooms');
+    const response = await fetch(apiUrl('/api/rooms'));
     if (!response.ok) throw new Error('加载房间失败');
     renderRoomList(await response.json());
   } catch {
@@ -131,10 +178,10 @@ function stopLobbyRoomListPolling() {
 async function createRoom() {
   hideError(lobbyError);
   try {
-    const response = await fetch('/api/rooms', {
+    const response = await fetch(apiUrl('/api/rooms'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: playerNameInput.value })
+      body: JSON.stringify({ name: playerNameInput.value, clientId: state.clientId })
     });
     if (!response.ok) throw new Error(await response.text());
     enterRoom(await response.json());
@@ -150,10 +197,10 @@ async function joinRoomById(roomId) {
     return;
   }
   try {
-    const response = await fetch(`/api/rooms/${roomId}/join`, {
+    const response = await fetch(apiUrl(`/api/rooms/${roomId}/join`), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: playerNameInput.value })
+      body: JSON.stringify({ name: playerNameInput.value, clientId: state.clientId })
     });
     if (!response.ok) throw new Error(await response.text());
     enterRoom(await response.json());
@@ -170,35 +217,66 @@ function enterRoom(data) {
   state.isHost = data.host;
   lobbyPanel.classList.add('hidden');
   gamePanel.classList.remove('hidden');
+  document.body.classList.add('in-game');
   roomIdLabel.textContent = state.roomId;
   if (!state.threeReady) initThree();
   connectWebSocket();
   startMoveLoop();
   onResize();
+  requestAnimationFrame(onResize);
 }
 
-function leaveGame() {
+async function leaveGame() {
   exitPointerLock();
-  if (state.ws) state.ws.close();
+  state.intentionalLeave = true;
+  const roomId = state.roomId;
+  const playerId = state.playerId;
+  const clientId = state.clientId;
+  if (roomId && clientId) {
+    try {
+      const response = await fetch(buildLeaveUrl(roomId, playerId, clientId), { method: 'POST' });
+      if (!response.ok) {
+        console.warn('离开房间失败:', await response.text());
+      }
+    } catch (err) {
+      console.warn('离开房间请求失败', err);
+    }
+  }
+  if (state.ws) {
+    if (state.ws.readyState === WebSocket.OPEN) {
+      sendMessage({ type: 'LEAVE', roomId, playerId });
+    }
+    state.ws.close();
+  }
+  resetToLobby();
+}
+
+function resetToLobby() {
+  document.body.classList.remove('in-game');
   state.roomId = null;
   state.playerId = null;
   state.snapshot = null;
+  state.ws = null;
   gamePanel.classList.add('hidden');
   lobbyPanel.classList.remove('hidden');
   hideError(gameError);
   crosshair.classList.add('hidden');
   startLobbyRoomListPolling();
+  refreshRoomList();
 }
 
 function connectWebSocket() {
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  state.ws = new WebSocket(`${protocol}://${location.host}/ws/game`);
+  state.ws = new WebSocket(`${protocol}://${location.host}${apiUrl('/ws/game')}`);
   state.ws.onopen = () => {
     sendMessage({ type: 'JOIN', roomId: state.roomId, playerId: state.playerId });
   };
   state.ws.onmessage = (event) => handleServerMessage(JSON.parse(event.data));
   state.ws.onclose = () => {
-    hintBar.textContent = '连接已断开，请刷新页面重试';
+    if (!state.intentionalLeave) {
+      hintBar.textContent = '连接已断开，请刷新页面重试';
+    }
+    state.intentionalLeave = false;
     exitPointerLock();
   };
 }
@@ -344,10 +422,10 @@ function updateUi() {
         : '点击画面锁定鼠标';
     } else if (me.role === 'HIDER' && snapshot.phase === 'HIDING') {
       hintBar.textContent = state.pointerLocked
-        ? '第三人称躲藏：WASD 移动，E 吸色伪装'
+        ? '第三人称躲藏：WASD 移动，E 伪装成瞄准的道具'
         : '点击画面锁定鼠标';
     } else if (me.role === 'HIDER' && snapshot.phase === 'SEEKING') {
-      hintBar.textContent = '第三人称：保持隐蔽，别被猎人发现';
+      hintBar.textContent = '保持伪装，别被猎人发现';
     } else if (inRoundEnd) {
       hintBar.textContent = '回合结束，请准备后由房主开始下一局';
       exitPointerLock();
@@ -408,9 +486,9 @@ function renderPlayerList(snapshot, me) {
 function initThree() {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(0x9fd4ff);
-  scene.fog = new THREE.Fog(0x9fd4ff, 20, 55);
+  scene.fog = new THREE.Fog(0x9fd4ff, 70, 220);
 
-  camera = new THREE.PerspectiveCamera(75, 16 / 10, 0.1, 120);
+  camera = new THREE.PerspectiveCamera(75, 16 / 10, 0.1, 280);
   camera.rotation.order = 'YXZ';
 
   renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -450,13 +528,13 @@ function createPart(geometry, material, pos, rot = [0, 0, 0]) {
 function addLights() {
   scene.add(new THREE.AmbientLight(0xffffff, 0.55));
   const sun = new THREE.DirectionalLight(0xfff2dd, 1.1);
-  sun.position.set(12, 24, 10);
+  sun.position.set(48, 80, 40);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.camera.left = -20;
-  sun.shadow.camera.right = 20;
-  sun.shadow.camera.top = 20;
-  sun.shadow.camera.bottom = -20;
+  sun.shadow.camera.left = -80;
+  sun.shadow.camera.right = 80;
+  sun.shadow.camera.top = 80;
+  sun.shadow.camera.bottom = -80;
   scene.add(sun);
 }
 
@@ -467,59 +545,19 @@ function addProp(mesh, pickable = true) {
   if (pickable) pickableMeshes.push(mesh);
 }
 
-function buildRoom() {
-  const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(ROOM_W, ROOM_D),
-    new THREE.MeshStandardMaterial({ color: 0x6db34a })
-  );
-  floor.rotation.x = -Math.PI / 2;
-  floor.receiveShadow = true;
-  scene.add(floor);
-  pickableMeshes.push(floor);
-
-  const wallMat = new THREE.MeshStandardMaterial({ color: 0xc9a66b });
-  addProp(new THREE.Mesh(new THREE.BoxGeometry(ROOM_W, 7, 0.6), wallMat).translateX(0).translateY(3.5).translateZ(-ROOM_D / 2));
-  addProp(new THREE.Mesh(new THREE.BoxGeometry(0.6, 7, ROOM_D), wallMat).translateX(-ROOM_W / 2).translateY(3.5));
-  addProp(new THREE.Mesh(new THREE.BoxGeometry(0.6, 7, ROOM_D), wallMat).translateX(ROOM_W / 2).translateY(3.5));
-
-  const beam = new THREE.Mesh(new THREE.BoxGeometry(ROOM_W, 0.5, 0.8), new THREE.MeshStandardMaterial({ color: 0x8b5a2b }));
-  beam.position.set(0, 6.8, -ROOM_D / 2 + 0.2);
-  addProp(beam);
-
-  const redBox = new THREE.Mesh(new THREE.BoxGeometry(3.5, 2.5, 3), new THREE.MeshStandardMaterial({ color: 0xe85d5d }));
-  redBox.position.set(-12, 1.25, -5);
-  addProp(redBox);
-
-  const yellowBox = new THREE.Mesh(new THREE.BoxGeometry(4, 3, 3.5), new THREE.MeshStandardMaterial({ color: 0xf4c542 }));
-  yellowBox.position.set(11, 1.5, 4);
-  addProp(yellowBox);
-
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.7, 3.5, 10), new THREE.MeshStandardMaterial({ color: 0x6a4a2d }));
-  trunk.position.set(10, 1.75, -6);
-  addProp(trunk);
-
-  const crown = new THREE.Mesh(new THREE.SphereGeometry(2.2, 16, 16), new THREE.MeshStandardMaterial({ color: 0x5a8f4a }));
-  crown.position.set(10, 4.5, -6);
-  addProp(crown);
-
-  const tableTop = new THREE.Mesh(new THREE.BoxGeometry(5, 0.3, 2.5), new THREE.MeshStandardMaterial({ color: 0xffffff }));
-  tableTop.position.set(-2, 2.2, 2);
-  addProp(tableTop);
-
-  const tableLegMat = new THREE.MeshStandardMaterial({ color: 0xd9d9d9 });
-  [[-4.2, 1.1, 1.1], [-4.2, 1.1, 2.9], [0.2, 1.1, 1.1], [0.2, 1.1, 2.9]].forEach(([x, y, z]) => {
-    const leg = new THREE.Mesh(new THREE.BoxGeometry(0.35, 2.2, 0.35), tableLegMat);
-    leg.position.set(x, y, z);
-    addProp(leg);
+function addPropGroup(group, pickable = true) {
+  group.traverse((child) => {
+    if (child.isMesh) {
+      child.castShadow = true;
+      child.receiveShadow = true;
+      if (pickable) pickableMeshes.push(child);
+    }
   });
+  scene.add(group);
+}
 
-  const bench = new THREE.Mesh(new THREE.BoxGeometry(4.5, 0.5, 1.2), new THREE.MeshStandardMaterial({ color: 0x4a6741 }));
-  bench.position.set(4, 0.8, 6);
-  addProp(bench);
-
-  const rug = new THREE.Mesh(new THREE.BoxGeometry(8, 0.08, 5), new THREE.MeshStandardMaterial({ color: 0x8b7355 }));
-  rug.position.set(0, 0.04, 0);
-  addProp(rug);
+function buildRoom() {
+  buildEnvironment(scene, addProp, addPropGroup, ROOM_W, ROOM_D);
 }
 
 function worldToBackend(x, z) {
@@ -536,18 +574,64 @@ function backendToWorld(x, y) {
   };
 }
 
-function createPlayerMesh(player) {
-  const geometry = new THREE.CapsuleGeometry(0.55, 1.2, 6, 12);
-  const material = new THREE.MeshStandardMaterial({
-    color: hexToNumber(player.color || '#FFFFFF'),
-    roughness: 0.65
+function disposeObject3D(obj) {
+  obj.traverse((child) => {
+    if (child.geometry) child.geometry.dispose();
+    if (child.material) {
+      if (Array.isArray(child.material)) child.material.forEach((m) => m.dispose());
+      else child.material.dispose();
+    }
   });
-  const mesh = new THREE.Mesh(geometry, material);
-  mesh.castShadow = true;
-  mesh.userData.playerId = player.id;
-  scene.add(mesh);
-  playerMeshes.set(player.id, mesh);
-  return mesh;
+}
+
+function playerVisualKey(player) {
+  const phase = state.snapshot?.phase;
+  const disguised = isGameplay() && player.role === 'HIDER' && !player.found && player.disguise;
+  if (disguised) return `disguise:${player.disguise}`;
+  if (player.role === 'SEEKER' && isGameplay()) return 'seeker';
+  return `human:${getHumanoidVariant(player, phase)}:${player.color || '#FFFFFF'}`;
+}
+
+function rebuildPlayerVisual(root, player) {
+  while (root.children.length) {
+    const child = root.children[0];
+    root.remove(child);
+    disposeObject3D(child);
+  }
+  const disguised = isGameplay() && player.role === 'HIDER' && !player.found && player.disguise;
+  if (disguised) {
+    const prop = createDisguiseVisual(player.disguise);
+    if (prop) root.add(prop);
+    else root.add(createHumanoid(hexToNumber(player.color || '#FFFFFF'), 'hider'));
+  } else if (player.role === 'SEEKER' && isGameplay()) {
+    root.add(createHumanoid(0xffffff, 'seeker'));
+  } else {
+    const variant = getHumanoidVariant(player, state.snapshot?.phase);
+    root.add(createHumanoid(hexToNumber(player.color || '#FFFFFF'), variant));
+  }
+}
+
+function createPlayerAvatar(player) {
+  const root = new THREE.Group();
+  root.userData.playerId = player.id;
+  root.userData.visualKey = '';
+  scene.add(root);
+  playerMeshes.set(player.id, root);
+  rebuildPlayerVisual(root, player);
+  root.userData.visualKey = playerVisualKey(player);
+  return root;
+}
+
+function updatePlayerAvatar(root, player) {
+  const nextKey = playerVisualKey(player);
+  if (root.userData.visualKey !== nextKey) {
+    rebuildPlayerVisual(root, player);
+    root.userData.visualKey = nextKey;
+  }
+}
+
+function createPlayerMesh(player) {
+  return createPlayerAvatar(player);
 }
 
 function syncPlayerMeshes() {
@@ -559,26 +643,26 @@ function syncPlayerMeshes() {
     if (state.snapshot.phase === 'LOBBY' && !player.entered) return;
 
     visibleIds.add(player.id);
-    let mesh = playerMeshes.get(player.id);
-    if (!mesh) mesh = createPlayerMesh(player);
+    let root = playerMeshes.get(player.id);
+    if (!root) root = createPlayerAvatar(player);
+    updatePlayerAvatar(root, player);
 
     const pos = backendToWorld(player.x, player.y);
-    mesh.position.set(pos.x, 1.1, pos.z);
-    mesh.visible = true;
+    root.position.set(pos.x, 0, pos.z);
+    root.visible = true;
 
     const isMe = player.id === state.playerId;
     if (isThirdPerson() && isMe) {
-      mesh.visible = true;
+      root.visible = true;
     } else if (isSeekerFirstPerson() && isMe) {
-      mesh.visible = false;
+      root.visible = false;
     }
 
-    if (player.role === 'SEEKER' && isGameplay()) {
-      mesh.material.color.setHex(0xff6b6b);
-    } else {
-      mesh.material.color.setHex(hexToNumber(player.color || '#FFFFFF'));
+    root.scale.setScalar(isMe ? 1.05 : 1);
+
+    if (isMe && isThirdPerson() && state.pointerLocked) {
+      root.rotation.y = state.yaw;
     }
-    mesh.scale.setScalar(isMe ? 1.05 : 1);
   });
 
   playerMeshes.forEach((mesh, id) => {
@@ -588,8 +672,8 @@ function syncPlayerMeshes() {
 
 function updatePreviewCamera() {
   state.previewAngle += 0.003;
-  const r = 22;
-  camera.position.set(Math.sin(state.previewAngle) * r, 14, Math.cos(state.previewAngle) * r);
+  const r = 84;
+  camera.position.set(Math.sin(state.previewAngle) * r, 48, Math.cos(state.previewAngle) * r);
   camera.lookAt(0, 1.5, 0);
 }
 
@@ -606,8 +690,8 @@ function updateThirdPersonCamera() {
   const me = getMe();
   if (!me) return;
   const pos = backendToWorld(me.x, me.y);
-  const cx = pos.x - Math.sin(state.yaw) * TP_DISTANCE;
-  const cz = pos.z - Math.cos(state.yaw) * TP_DISTANCE;
+  const cx = pos.x + Math.sin(state.yaw) * TP_DISTANCE;
+  const cz = pos.z + Math.cos(state.yaw) * TP_DISTANCE;
   camera.position.set(cx, EYE_HEIGHT + 1.8, cz);
   camera.lookAt(pos.x, 1.2, pos.z);
 }
@@ -646,6 +730,23 @@ function onResize() {
   renderer.setSize(width, height, false);
 }
 
+function getCameraMoveDelta(forward, strafe, speed) {
+  const moveForward = new THREE.Vector3();
+  camera.getWorldDirection(moveForward);
+  moveForward.y = 0;
+  if (moveForward.lengthSq() < 1e-6) {
+    moveForward.set(-Math.sin(state.yaw), 0, -Math.cos(state.yaw));
+  } else {
+    moveForward.normalize();
+  }
+
+  const moveRight = new THREE.Vector3().crossVectors(moveForward, new THREE.Vector3(0, 1, 0)).normalize();
+  return {
+    dx: (forward * moveForward.x + strafe * moveRight.x) * speed,
+    dz: (forward * moveForward.z + strafe * moveRight.z) * speed
+  };
+}
+
 function startMoveLoop() {
   if (state.moveTimer) clearInterval(state.moveTimer);
   state.moveTimer = setInterval(() => {
@@ -657,13 +758,13 @@ function startMoveLoop() {
 
     if (state.snapshot.phase === 'LOBBY' && me.entered) {
       canMove = true;
-      speed = 0.2;
+      speed = 0.28;
     } else if (me.role === 'HIDER' && !me.found && isGameplay()) {
       canMove = true;
-      speed = state.snapshot.phase === 'HIDING' ? 0.22 : 0.08;
+      speed = state.snapshot.phase === 'HIDING' ? 0.28 : 0.1;
     } else if (me.role === 'SEEKER' && state.snapshot.phase === 'SEEKING') {
       canMove = true;
-      speed = 0.18;
+      speed = 0.24;
     }
     if (!canMove) return;
 
@@ -675,10 +776,7 @@ function startMoveLoop() {
     if (state.keys.d || state.keys.arrowright) strafe += 1;
     if (forward === 0 && strafe === 0) return;
 
-    const sin = Math.sin(state.yaw);
-    const cos = Math.cos(state.yaw);
-    const dx = (strafe * cos + forward * sin) * speed;
-    const dz = (strafe * -sin + forward * cos) * speed;
+    const { dx, dz } = getCameraMoveDelta(forward, strafe, speed);
 
     const pos = backendToWorld(me.x, me.y);
     const marginX = (PLAYER_RADIUS / WORLD_WIDTH) * ROOM_W;
@@ -733,18 +831,25 @@ function shoot() {
 
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
   const targets = [...playerMeshes.values()].filter((m) => m.visible && m.userData.playerId !== state.playerId);
-  const hits = raycaster.intersectObjects(targets, false);
+  const hits = raycaster.intersectObjects(targets, true);
 
   playGunRecoil();
   addTracer(hits[0]?.point);
 
-  if (hits.length > 0) {
-    sendMessage({
-      type: 'SHOOT',
-      roomId: state.roomId,
-      playerId: state.playerId,
-      targetPlayerId: hits[0].object.userData.playerId
-    });
+  for (const hit of hits) {
+    let node = hit.object;
+    while (node) {
+      if (node.userData?.playerId) {
+        sendMessage({
+          type: 'SHOOT',
+          roomId: state.roomId,
+          playerId: state.playerId,
+          targetPlayerId: node.userData.playerId
+        });
+        return;
+      }
+      node = node.parent;
+    }
   }
 }
 
@@ -784,14 +889,30 @@ function updateTracers() {
 
 function sampleColorAtCrosshair() {
   const me = getMe();
-  if (!me || me.role !== 'HIDER' || state.snapshot?.phase !== 'HIDING') return;
+  if (!me || me.role !== 'HIDER' || !isGameplay() || me.found) return;
   raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
-  const hits = raycaster.intersectObjects(pickableMeshes, false);
+  const hits = raycaster.intersectObjects(pickableMeshes, true);
   if (hits.length === 0) return;
-  const color = colorToHex(hits[0].object.material.color);
+
+  const hit = hits[0].object;
+  const propType = resolvePropType(hit);
+  if (!propType) {
+    hintBar.textContent = '请对准场景里的道具（树、箱子、长椅等）';
+    return;
+  }
+
+  const color = colorToHex(sampleMeshColor(hit));
   me.color = color;
-  sendMessage({ type: 'CAMOUFLAGE', roomId: state.roomId, playerId: state.playerId, color });
-  hintBar.textContent = `已吸色：${color}`;
+  me.disguise = propType;
+  sendMessage({
+    type: 'CAMOUFLAGE',
+    roomId: state.roomId,
+    playerId: state.playerId,
+    color,
+    disguise: propType
+  });
+  const label = DISGUISE_NAMES[propType] || propType;
+  hintBar.textContent = `已伪装成：${label}`;
   syncPlayerMeshes();
 }
 

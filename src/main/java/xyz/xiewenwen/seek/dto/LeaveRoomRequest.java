@@ -1,16 +1,16 @@
 package xyz.xiewenwen.seek.dto;
 
-public class JoinRoomRequest {
+public class LeaveRoomRequest {
 
-	private String name;
+	private String playerId;
 	private String clientId;
 
-	public String getName() {
-		return name;
+	public String getPlayerId() {
+		return playerId;
 	}
 
-	public void setName(String name) {
-		this.name = name;
+	public void setPlayerId(String playerId) {
+		this.playerId = playerId;
 	}
 
 	public String getClientId() {

@@ -8,19 +8,24 @@ public class Player {
 	private double x = 400;
 	private double y = 300;
 	private String color = "#FFFFFF";
+	private String disguise;
 	private boolean found;
 	private boolean host;
 	private boolean ready;
 	private boolean entered;
+	private String clientId;
+	private long joinedAt = System.currentTimeMillis();
 
 	public Player() {
 	}
 
-	public Player(String id, String name, boolean host) {
+	public Player(String id, String name, boolean host, String clientId) {
 		this.id = id;
 		this.name = name;
 		this.host = host;
 		this.ready = host;
+		this.clientId = clientId;
+		this.joinedAt = System.currentTimeMillis();
 	}
 
 	public String getId() {
@@ -71,6 +76,14 @@ public class Player {
 		this.color = color;
 	}
 
+	public String getDisguise() {
+		return disguise;
+	}
+
+	public void setDisguise(String disguise) {
+		this.disguise = disguise;
+	}
+
 	public boolean isFound() {
 		return found;
 	}
@@ -101,5 +114,21 @@ public class Player {
 
 	public void setEntered(boolean entered) {
 		this.entered = entered;
+	}
+
+	public String getClientId() {
+		return clientId;
+	}
+
+	public void setClientId(String clientId) {
+		this.clientId = clientId;
+	}
+
+	public long getJoinedAt() {
+		return joinedAt;
+	}
+
+	public void setJoinedAt(long joinedAt) {
+		this.joinedAt = joinedAt;
 	}
 }

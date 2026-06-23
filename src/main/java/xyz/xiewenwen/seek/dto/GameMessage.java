@@ -10,6 +10,7 @@ public class GameMessage {
 	private Double x;
 	private Double y;
 	private String color;
+	private String disguise;
 	private String targetPlayerId;
 	private Boolean ready;
 	private JsonNode payload;
@@ -60,6 +61,14 @@ public class GameMessage {
 
 	public void setColor(String color) {
 		this.color = color;
+	}
+
+	public String getDisguise() {
+		return disguise;
+	}
+
+	public void setDisguise(String disguise) {
+		this.disguise = disguise;
 	}
 
 	public String getTargetPlayerId() {

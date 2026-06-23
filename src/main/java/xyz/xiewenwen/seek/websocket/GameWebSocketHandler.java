@@ -23,6 +23,10 @@ import xyz.xiewenwen.seek.service.RoomService;
 @Component
 public class GameWebSocketHandler extends TextWebSocketHandler {
 
+	private static final String ATTR_ROOM_ID = "roomId";
+	private static final String ATTR_PLAYER_ID = "playerId";
+	private static final String ATTR_LEFT = "left";
+
 	private final RoomService roomService;
 	private final ObjectMapper objectMapper;
 	private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
@@ -58,6 +62,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 			case "READY" -> handleReady(session, incoming);
 			case "ENTER" -> handleEnter(session, incoming);
 			case "KICK" -> handleKick(session, incoming);
+			case "LEAVE" -> handleLeave(session, incoming);
 			default -> {
 			}
 		}
@@ -66,7 +71,85 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 	@Override
 	public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
 		sessions.remove(session.getId());
+		disconnectSession(session);
+	}
+
+	private void handleLeave(WebSocketSession session, GameMessage message) throws IOException {
+		GameRoom room = requireRoom(session, message.getRoomId());
+		if (room == null) {
+			return;
+		}
+		markPlayerLeft(session, room.getId(), message.getPlayerId());
+	}
+
+	private void disconnectSession(WebSocketSession session) {
+		if (Boolean.TRUE.equals(session.getAttributes().get(ATTR_LEFT))) {
+			roomService.unbindSession(session.getId());
+			clearSessionAttributes(session);
+			return;
+		}
+		String roomId = getSessionRoomId(session);
+		String playerId = getSessionPlayerId(session);
 		roomService.unbindSession(session.getId());
+		clearSessionAttributes(session);
+		if (roomId == null || playerId == null) {
+			return;
+		}
+		try {
+			onPlayerLeft(roomId, playerId);
+		} catch (IOException ex) {
+			// ignore broadcast failures during disconnect
+		}
+	}
+
+	private void markPlayerLeft(WebSocketSession session, String roomId, String playerId) throws IOException {
+		if (Boolean.TRUE.equals(session.getAttributes().get(ATTR_LEFT))) {
+			return;
+		}
+		session.getAttributes().put(ATTR_LEFT, true);
+		onPlayerLeft(roomId, playerId);
+		roomService.unbindSession(session.getId());
+		clearSessionAttributes(session);
+	}
+
+	private String getSessionRoomId(WebSocketSession session) {
+		Object roomId = session.getAttributes().get(ATTR_ROOM_ID);
+		if (roomId != null) {
+			return roomId.toString();
+		}
+		return roomService.getRoomIdForSession(session.getId());
+	}
+
+	private String getSessionPlayerId(WebSocketSession session) {
+		Object playerId = session.getAttributes().get(ATTR_PLAYER_ID);
+		if (playerId != null) {
+			return playerId.toString();
+		}
+		return roomService.getPlayerIdForSession(session.getId());
+	}
+
+	private void clearSessionAttributes(WebSocketSession session) {
+		session.getAttributes().remove(ATTR_ROOM_ID);
+		session.getAttributes().remove(ATTR_PLAYER_ID);
+		session.getAttributes().remove(ATTR_LEFT);
+	}
+
+	private void onPlayerLeft(String roomId, String playerId) throws IOException {
+		String clientId = null;
+		GameRoom roomBefore = roomService.getRoom(roomId);
+		if (roomBefore != null) {
+			Player player = roomBefore.findPlayer(playerId);
+			if (player != null) {
+				clientId = player.getClientId();
+			}
+		}
+		boolean deleted = roomService.leaveRoom(roomId, playerId, clientId);
+		if (!deleted) {
+			GameRoom room = roomService.getRoom(roomId);
+			if (room != null) {
+				broadcastRoom(room);
+			}
+		}
 	}
 
 	private void handleJoin(WebSocketSession session, GameMessage message) throws IOException {
@@ -81,6 +164,9 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 			return;
 		}
 		roomService.bindSession(session.getId(), room.getId(), message.getPlayerId());
+		session.getAttributes().put(ATTR_ROOM_ID, room.getId());
+		session.getAttributes().put(ATTR_PLAYER_ID, message.getPlayerId());
+		session.getAttributes().remove(ATTR_LEFT);
 		send(session, envelope("JOINED", roomService.toSnapshot(room)));
 		broadcastRoom(room);
 	}
@@ -125,7 +211,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 		if (room == null || message.getColor() == null) {
 			return;
 		}
-		roomService.camouflagePlayer(room, message.getPlayerId(), message.getColor());
+		roomService.camouflagePlayer(room, message.getPlayerId(), message.getColor(), message.getDisguise());
 		broadcastRoom(room);
 	}
 
@@ -164,7 +250,9 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 		try {
 			roomService.kickPlayer(room, message.getPlayerId(), message.getTargetPlayerId());
 			notifyKicked(message.getTargetPlayerId(), room.getId());
-			broadcastRoom(room);
+			if (roomService.getRoom(room.getId()) != null) {
+				broadcastRoom(room);
+			}
 		} catch (IllegalStateException | IllegalArgumentException ex) {
 			sendError(session, ex.getMessage());
 		}
@@ -218,6 +306,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 	}
 
 	private void tickRooms() {
+		roomService.purgeStaleLobbyPlayers(roomService.getConnectedPlayerIds());
 		for (String roomId : roomService.getRoomIds()) {
 			GameRoom room = roomService.getRoom(roomId);
 			if (room == null) {
