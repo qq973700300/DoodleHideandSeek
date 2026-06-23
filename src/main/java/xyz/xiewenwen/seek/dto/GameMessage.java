@@ -9,6 +9,8 @@ public class GameMessage {
 	private String roomId;
 	private Double x;
 	private Double y;
+	private Double height;
+	private Double yaw;
 	private String color;
 	private String disguise;
 	private String targetPlayerId;
@@ -53,6 +55,22 @@ public class GameMessage {
 
 	public void setY(Double y) {
 		this.y = y;
+	}
+
+	public Double getHeight() {
+		return height;
+	}
+
+	public void setHeight(Double height) {
+		this.height = height;
+	}
+
+	public Double getYaw() {
+		return yaw;
+	}
+
+	public void setYaw(Double yaw) {
+		this.yaw = yaw;
 	}
 
 	public String getColor() {

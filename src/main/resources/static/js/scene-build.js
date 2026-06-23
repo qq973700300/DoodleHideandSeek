@@ -392,6 +392,16 @@ const DISGUISE_BUILDERS = {
   lamp_post: () => buildLampPost(0, 0)
 };
 
+export const DISGUISE_COLLISION = {};
+for (const [type, builder] of Object.entries(DISGUISE_BUILDERS)) {
+  const scale = DISGUISE_SCALE[type] ?? 1;
+  const model = builder(scale);
+  const bounds = new THREE.Box3().setFromObject(model);
+  const halfW = Math.max(0.4, (bounds.max.x - bounds.min.x) * 0.55 * 0.5);
+  const halfD = Math.max(0.4, (bounds.max.z - bounds.min.z) * 0.55 * 0.5);
+  DISGUISE_COLLISION[type] = { halfW, halfD };
+}
+
 export function resolvePropType(object) {
   let current = object;
   while (current) {

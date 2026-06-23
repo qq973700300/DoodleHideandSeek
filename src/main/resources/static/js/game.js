@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { buildEnvironment } from './scene-build.js';
-import { DISGUISE_NAMES, resolvePropType, sampleMeshColor } from './scene-build.js';
+import { DISGUISE_NAMES, DISGUISE_COLLISION, resolvePropType, sampleMeshColor } from './scene-build.js';
 import { createHumanoid, createDisguiseVisual, getHumanoidVariant } from './player-models.js';
 
 const WORLD_WIDTH = 3200;
@@ -11,6 +11,16 @@ const ROOM_D = 80;
 const EYE_HEIGHT = 1.55;
 const SHOOT_COOLDOWN_MS = 350;
 const TP_DISTANCE = 5.5;
+const COLLISION_PENETRATION_RATIO = 0.5;
+const COLLISION_FOOTPRINT = 0.55;
+const JUMP_VELOCITY = 5.2;
+const GRAVITY = 18;
+const MAX_JUMP_HEIGHT = 1.6;
+const MOVE_SEND_MS = 50;
+const LOBBY_SPEED = 5.6;
+const HIDER_HIDE_SPEED = 5.6;
+const HIDER_SEEK_SPEED = 2.0;
+const SEEKER_SPEED = 4.8;
 const GAME_BASE = location.pathname === '/game' || location.pathname.startsWith('/game/') ? '/game' : '';
 
 function apiUrl(path) {
@@ -32,7 +42,13 @@ const state = {
   pitch: 0,
   lastShot: 0,
   previewAngle: 0,
-  intentionalLeave: false
+  intentionalLeave: false,
+  jumpVelocity: 0,
+  jumpQueued: false,
+  lastAnimTime: performance.now(),
+  lastMoveSentAt: 0,
+  moveDirty: false,
+  facingDirty: false
 };
 
 const canvas = document.getElementById('game-canvas');
@@ -63,6 +79,7 @@ let renderer;
 let raycaster;
 let playerMeshes = new Map();
 let pickableMeshes = [];
+let propCollisionBoxes = [];
 let gunGroup;
 let tracers = [];
 let roomListTimer = null;
@@ -79,10 +96,13 @@ nextRoundBtn.addEventListener('click', () => sendMessage({ type: 'NEXT_ROUND', r
 window.addEventListener('keydown', (e) => {
   if (e.target.matches('input, textarea')) return;
   const key = e.key.toLowerCase();
-  if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) {
+  if (['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', ' '].includes(key)) {
     e.preventDefault();
   }
   state.keys[key] = true;
+  if (key === ' ') {
+    state.jumpQueued = true;
+  }
   if (key === 'e') {
     sampleColorAtCrosshair();
   }
@@ -297,11 +317,17 @@ function handleServerMessage(message) {
       leaveGame();
       break;
     case 'JOINED':
-    case 'ROOM_STATE':
-      state.snapshot = message.data;
-      updateUi();
+    case 'ROOM_STATE': {
+      const prevSnapshot = state.snapshot;
+      applyRoomState(message.data);
+      if (roomStateNeedsUiRefresh(prevSnapshot, state.snapshot)) {
+        updateUi();
+      } else {
+        updateTimerLabel();
+      }
       syncPlayerMeshes();
       break;
+    }
     case 'PLAYER_FOUND':
       hintBar.textContent = `命中：${message.data.name}！`;
       break;
@@ -312,6 +338,51 @@ function handleServerMessage(message) {
 
 function getMe() {
   return state.snapshot?.players.find((p) => p.id === state.playerId) ?? null;
+}
+
+function canControlMovementFor(player, snapshot) {
+  if (!player || !snapshot) return false;
+  if (snapshot.phase === 'LOBBY' && player.entered) return true;
+  if (player.role === 'HIDER' && !player.found && (snapshot.phase === 'HIDING' || snapshot.phase === 'SEEKING')) return true;
+  if (player.role === 'SEEKER' && snapshot.phase === 'SEEKING') return true;
+  return false;
+}
+
+function applyRoomState(incoming) {
+  const prevMe = getMe();
+  const keepLocalTransform = prevMe && canControlMovementFor(prevMe, state.snapshot);
+  const localX = prevMe?.x;
+  const localY = prevMe?.y;
+  const localHeight = prevMe?.height ?? 0;
+
+  state.snapshot = incoming;
+
+  const me = getMe();
+  if (keepLocalTransform && me) {
+    me.x = localX;
+    me.y = localY;
+    me.height = localHeight;
+    me.yaw = state.yaw;
+  } else if (me && playerHeight(me) <= 0.01) {
+    state.jumpVelocity = 0;
+  }
+}
+
+function roomStateNeedsUiRefresh(prev, next) {
+  if (!prev || !next) return true;
+  if (prev.phase !== next.phase || prev.round !== next.round) return true;
+  if (prev.players.length !== next.players.length) return true;
+  for (let i = 0; i < next.players.length; i++) {
+    const a = prev.players[i];
+    const b = next.players[i];
+    if (!a || !b) return true;
+    if (a.id !== b.id || a.name !== b.name || a.role !== b.role || a.host !== b.host
+      || a.ready !== b.ready || a.entered !== b.entered || a.found !== b.found
+      || a.disguise !== b.disguise || a.color !== b.color) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function isGameplay() {
@@ -418,11 +489,11 @@ function updateUi() {
         : (me.ready ? '已准备，等待其他玩家和房主开始' : '请点击准备');
     } else if (isSeekerFirstPerson()) {
       hintBar.textContent = state.pointerLocked
-        ? '第一人称猎人：WASD 移动，左键射击'
+        ? '第一人称猎人：WASD 移动，空格跳跃，左键射击'
         : '点击画面锁定鼠标';
     } else if (me.role === 'HIDER' && snapshot.phase === 'HIDING') {
       hintBar.textContent = state.pointerLocked
-        ? '第三人称躲藏：WASD 移动，E 伪装成瞄准的道具'
+        ? '第三人称躲藏：WASD 移动，空格跳跃，E 伪装成瞄准的道具'
         : '点击画面锁定鼠标';
     } else if (me.role === 'HIDER' && snapshot.phase === 'SEEKING') {
       hintBar.textContent = '保持伪装，别被猎人发现';
@@ -436,6 +507,14 @@ function updateUi() {
 
   renderPlayerList(snapshot, me);
   updateGunVisibility();
+}
+
+function updateTimerLabel() {
+  const snapshot = state.snapshot;
+  if (!snapshot) return;
+  timerLabel.textContent = snapshot.phaseRemainingMs > 0
+    ? `${Math.ceil(snapshot.phaseRemainingMs / 1000)} 秒`
+    : '';
 }
 
 function renderPlayerList(snapshot, me) {
@@ -554,9 +633,205 @@ function addPropGroup(group, pickable = true) {
     }
   });
   scene.add(group);
+  registerPropCollision(group);
+}
+
+function worldPlayerRadius() {
+  const rx = (PLAYER_RADIUS / WORLD_WIDTH) * ROOM_W;
+  const rz = (PLAYER_RADIUS / WORLD_DEPTH) * ROOM_D;
+  return (rx + rz) * 0.5;
+}
+
+function registerPropCollision(group) {
+  const bounds = new THREE.Box3().setFromObject(group);
+  if (bounds.isEmpty()) return;
+
+  const cx = (bounds.min.x + bounds.max.x) * 0.5;
+  const cz = (bounds.min.z + bounds.max.z) * 0.5;
+  const halfW = Math.max(0.35, (bounds.max.x - bounds.min.x) * COLLISION_FOOTPRINT * 0.5);
+  const halfD = Math.max(0.35, (bounds.max.z - bounds.min.z) * COLLISION_FOOTPRINT * 0.5);
+  propCollisionBoxes.push({
+    minX: cx - halfW,
+    maxX: cx + halfW,
+    minZ: cz - halfD,
+    maxZ: cz + halfD
+  });
+}
+
+function resolveCircleBox(x, z, minDist, box) {
+  const closestX = clamp(x, box.minX, box.maxX);
+  const closestZ = clamp(z, box.minZ, box.maxZ);
+  const dx = x - closestX;
+  const dz = z - closestZ;
+  const distSq = dx * dx + dz * dz;
+  const maxInside = minDist;
+
+  if (distSq < 1e-8) {
+    const penLeft = x - box.minX;
+    const penRight = box.maxX - x;
+    const penBack = z - box.minZ;
+    const penFront = box.maxZ - z;
+    const minPen = Math.min(penLeft, penRight, penBack, penFront);
+    if (minPen <= maxInside) return { x, z };
+    if (minPen === penLeft) return { x: box.minX + maxInside, z };
+    if (minPen === penRight) return { x: box.maxX - maxInside, z };
+    if (minPen === penBack) return { x, z: box.minZ + maxInside };
+    return { x, z: box.maxZ - maxInside };
+  }
+
+  const dist = Math.sqrt(distSq);
+  if (dist >= minDist) return { x, z };
+
+  const push = minDist - dist;
+  return {
+    x: x + (dx / dist) * push,
+    z: z + (dz / dist) * push
+  };
+}
+
+function resolvePropCollisions(x, z, selfId) {
+  const minDist = worldPlayerRadius() * COLLISION_PENETRATION_RATIO;
+  let px = x;
+  let pz = z;
+
+  for (let iter = 0; iter < 6; iter++) {
+    let moved = false;
+    for (const box of propCollisionBoxes) {
+      const resolved = resolveCircleBox(px, pz, minDist, box);
+      if (resolved.x !== px || resolved.z !== pz) {
+        px = resolved.x;
+        pz = resolved.z;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return resolveDisguisedPlayerCollisions(px, pz, selfId);
+}
+
+function isPlayerDisguised(player) {
+  return isGameplay() && player.role === 'HIDER' && !player.found && player.disguise;
+}
+
+function getDisguiseCollisionBox(player, worldX, worldZ) {
+  const footprint = DISGUISE_COLLISION[player.disguise] || { halfW: 0.55, halfD: 0.55 };
+  return {
+    minX: worldX - footprint.halfW,
+    maxX: worldX + footprint.halfW,
+    minZ: worldZ - footprint.halfD,
+    maxZ: worldZ + footprint.halfD
+  };
+}
+
+function resolveDisguisedPlayerCollisions(x, z, selfId) {
+  const blockDist = worldPlayerRadius();
+  let px = x;
+  let pz = z;
+  if (!state.snapshot) return { x: px, z: pz };
+
+  for (let iter = 0; iter < 6; iter++) {
+    let moved = false;
+    for (const player of state.snapshot.players) {
+      if (player.id === selfId || !isPlayerDisguised(player)) continue;
+      const pos = backendToWorld(player.x, player.y);
+      const box = getDisguiseCollisionBox(player, pos.x, pos.z);
+      const resolved = resolveCircleBox(px, pz, blockDist, box);
+      if (resolved.x !== px || resolved.z !== pz) {
+        px = resolved.x;
+        pz = resolved.z;
+        moved = true;
+      }
+    }
+    if (!moved) break;
+  }
+  return { x: px, z: pz };
+}
+
+function playerHeight(player) {
+  return player?.height ?? 0;
+}
+
+function playerYaw(player) {
+  if (player.id === state.playerId && canControlCamera()) {
+    return state.yaw;
+  }
+  return player?.yaw ?? 0;
+}
+
+function shouldShowAvatarFacing(player) {
+  if (player.id === state.playerId) {
+    return isThirdPerson();
+  }
+  if (state.snapshot.phase === 'LOBBY' && !player.entered) return false;
+  if (isGameplay() && player.role === 'HIDER' && player.found) return false;
+  return true;
+}
+
+function canControlMovement() {
+  return canControlMovementFor(getMe(), state.snapshot);
+}
+
+function sendPlayerMove(me, force = false) {
+  if (!me) return;
+  const now = Date.now();
+  if (!force && now - state.lastMoveSentAt < MOVE_SEND_MS) {
+    state.moveDirty = true;
+    return;
+  }
+  state.lastMoveSentAt = now;
+  state.moveDirty = false;
+  state.facingDirty = false;
+  me.yaw = state.yaw;
+  sendMessage({
+    type: 'MOVE',
+    roomId: state.roomId,
+    playerId: state.playerId,
+    x: me.x,
+    y: me.y,
+    height: playerHeight(me),
+    yaw: state.yaw
+  });
+}
+
+function flushPendingMove() {
+  if (!state.moveDirty && !state.facingDirty) return;
+  sendPlayerMove(getMe(), true);
+}
+
+function updateJumpPhysics(dt) {
+  const me = getMe();
+  if (!me || !canControlMovement()) {
+    state.jumpVelocity = 0;
+    return;
+  }
+
+  if (state.jumpQueued && playerHeight(me) <= 0.01 && state.jumpVelocity <= 0) {
+    state.jumpVelocity = JUMP_VELOCITY;
+  }
+  state.jumpQueued = false;
+
+  if (state.jumpVelocity === 0 && playerHeight(me) <= 0) return;
+
+  state.jumpVelocity -= GRAVITY * dt;
+  let nextHeight = playerHeight(me) + state.jumpVelocity * dt;
+  if (nextHeight <= 0) {
+    nextHeight = 0;
+    state.jumpVelocity = 0;
+  } else {
+    nextHeight = Math.min(nextHeight, MAX_JUMP_HEIGHT);
+    if (nextHeight >= MAX_JUMP_HEIGHT && state.jumpVelocity > 0) {
+      state.jumpVelocity = 0;
+    }
+  }
+
+  if (Math.abs(nextHeight - playerHeight(me)) > 0.001) {
+    me.height = nextHeight;
+    state.moveDirty = true;
+  }
 }
 
 function buildRoom() {
+  propCollisionBoxes = [];
   buildEnvironment(scene, addProp, addPropGroup, ROOM_W, ROOM_D);
 }
 
@@ -646,27 +921,37 @@ function syncPlayerMeshes() {
     let root = playerMeshes.get(player.id);
     if (!root) root = createPlayerAvatar(player);
     updatePlayerAvatar(root, player);
-
-    const pos = backendToWorld(player.x, player.y);
-    root.position.set(pos.x, 0, pos.z);
     root.visible = true;
 
     const isMe = player.id === state.playerId;
-    if (isThirdPerson() && isMe) {
-      root.visible = true;
-    } else if (isSeekerFirstPerson() && isMe) {
+    if (isSeekerFirstPerson() && isMe) {
       root.visible = false;
-    }
-
-    root.scale.setScalar(isMe ? 1.05 : 1);
-
-    if (isMe && isThirdPerson() && state.pointerLocked) {
-      root.rotation.y = state.yaw;
     }
   });
 
   playerMeshes.forEach((mesh, id) => {
     if (!visibleIds.has(id)) mesh.visible = false;
+  });
+
+  updatePlayerMeshTransforms();
+}
+
+function updatePlayerMeshTransforms() {
+  if (!state.snapshot) return;
+
+  state.snapshot.players.forEach((player) => {
+    const root = playerMeshes.get(player.id);
+    if (!root || !root.visible) return;
+
+    const pos = backendToWorld(player.x, player.y);
+    const h = playerHeight(player);
+    root.position.set(pos.x, h, pos.z);
+
+    const isMe = player.id === state.playerId;
+    root.scale.setScalar(isMe ? 1.05 : 1);
+    if (shouldShowAvatarFacing(player)) {
+      root.rotation.y = playerYaw(player);
+    }
   });
 }
 
@@ -681,7 +966,8 @@ function updateFirstPersonCamera() {
   const me = getMe();
   if (!me) return;
   const pos = backendToWorld(me.x, me.y);
-  camera.position.set(pos.x, EYE_HEIGHT, pos.z);
+  const h = playerHeight(me);
+  camera.position.set(pos.x, EYE_HEIGHT + h, pos.z);
   camera.rotation.y = state.yaw;
   camera.rotation.x = state.pitch;
 }
@@ -690,10 +976,11 @@ function updateThirdPersonCamera() {
   const me = getMe();
   if (!me) return;
   const pos = backendToWorld(me.x, me.y);
+  const h = playerHeight(me);
   const cx = pos.x + Math.sin(state.yaw) * TP_DISTANCE;
   const cz = pos.z + Math.cos(state.yaw) * TP_DISTANCE;
-  camera.position.set(cx, EYE_HEIGHT + 1.8, cz);
-  camera.lookAt(pos.x, 1.2, pos.z);
+  camera.position.set(cx, EYE_HEIGHT + 1.8 + h, cz);
+  camera.lookAt(pos.x, 1.2 + h, pos.z);
 }
 
 function updateGunVisibility() {
@@ -703,6 +990,14 @@ function updateGunVisibility() {
 
 function animate() {
   requestAnimationFrame(animate);
+
+  const now = performance.now();
+  const dt = Math.min(0.05, (now - state.lastAnimTime) / 1000);
+  state.lastAnimTime = now;
+  updateJumpPhysics(dt);
+  updateLocalMovement(dt);
+  updatePlayerMeshTransforms();
+  flushPendingMove();
 
   const me = getMe();
   if (state.snapshot?.phase === 'LOBBY' && me && !me.entered) {
@@ -747,48 +1042,48 @@ function getCameraMoveDelta(forward, strafe, speed) {
   };
 }
 
+function updateLocalMovement(dt) {
+  const me = getMe();
+  if (!me || !state.snapshot || !canControlMovement()) return;
+
+  let speed = LOBBY_SPEED;
+  if (state.snapshot.phase === 'LOBBY') {
+    speed = LOBBY_SPEED;
+  } else if (me.role === 'HIDER') {
+    speed = state.snapshot.phase === 'HIDING' ? HIDER_HIDE_SPEED : HIDER_SEEK_SPEED;
+  } else if (me.role === 'SEEKER') {
+    speed = SEEKER_SPEED;
+  }
+
+  let forward = 0;
+  let strafe = 0;
+  if (state.keys.w || state.keys.arrowup) forward += 1;
+  if (state.keys.s || state.keys.arrowdown) forward -= 1;
+  if (state.keys.a || state.keys.arrowleft) strafe -= 1;
+  if (state.keys.d || state.keys.arrowright) strafe += 1;
+  if (forward === 0 && strafe === 0) return;
+
+  const step = speed * dt;
+  const { dx, dz } = getCameraMoveDelta(forward, strafe, step);
+
+  const pos = backendToWorld(me.x, me.y);
+  const marginX = (PLAYER_RADIUS / WORLD_WIDTH) * ROOM_W;
+  const marginZ = (PLAYER_RADIUS / WORLD_DEPTH) * ROOM_D;
+  let nextX = clamp(pos.x + dx, -ROOM_W / 2 + marginX, ROOM_W / 2 - marginX);
+  let nextZ = clamp(pos.z + dz, -ROOM_D / 2 + marginZ, ROOM_D / 2 - marginZ);
+  ({ x: nextX, z: nextZ } = resolvePropCollisions(nextX, nextZ, state.playerId));
+  const backend = worldToBackend(nextX, nextZ);
+
+  me.x = backend.x;
+  me.y = backend.y;
+  state.moveDirty = true;
+}
+
 function startMoveLoop() {
-  if (state.moveTimer) clearInterval(state.moveTimer);
-  state.moveTimer = setInterval(() => {
-    const me = getMe();
-    if (!me || !state.snapshot) return;
-
-    let canMove = false;
-    let speed = 0.18;
-
-    if (state.snapshot.phase === 'LOBBY' && me.entered) {
-      canMove = true;
-      speed = 0.28;
-    } else if (me.role === 'HIDER' && !me.found && isGameplay()) {
-      canMove = true;
-      speed = state.snapshot.phase === 'HIDING' ? 0.28 : 0.1;
-    } else if (me.role === 'SEEKER' && state.snapshot.phase === 'SEEKING') {
-      canMove = true;
-      speed = 0.24;
-    }
-    if (!canMove) return;
-
-    let forward = 0;
-    let strafe = 0;
-    if (state.keys.w || state.keys.arrowup) forward += 1;
-    if (state.keys.s || state.keys.arrowdown) forward -= 1;
-    if (state.keys.a || state.keys.arrowleft) strafe -= 1;
-    if (state.keys.d || state.keys.arrowright) strafe += 1;
-    if (forward === 0 && strafe === 0) return;
-
-    const { dx, dz } = getCameraMoveDelta(forward, strafe, speed);
-
-    const pos = backendToWorld(me.x, me.y);
-    const marginX = (PLAYER_RADIUS / WORLD_WIDTH) * ROOM_W;
-    const marginZ = (PLAYER_RADIUS / WORLD_DEPTH) * ROOM_D;
-    const nextX = clamp(pos.x + dx, -ROOM_W / 2 + marginX, ROOM_W / 2 - marginX);
-    const nextZ = clamp(pos.z + dz, -ROOM_D / 2 + marginZ, ROOM_D / 2 - marginZ);
-    const backend = worldToBackend(nextX, nextZ);
-
-    me.x = backend.x;
-    me.y = backend.y;
-    sendMessage({ type: 'MOVE', roomId: state.roomId, playerId: state.playerId, x: backend.x, y: backend.y });
-  }, 50);
+  if (state.moveTimer) {
+    clearInterval(state.moveTimer);
+    state.moveTimer = null;
+  }
 }
 
 function onCanvasClick() {
@@ -811,6 +1106,11 @@ function onMouseMove(event) {
   } else {
     state.pitch = clamp(state.pitch, -Math.PI / 2 + 0.05, Math.PI / 2 - 0.05);
   }
+  const me = getMe();
+  if (me) {
+    me.yaw = state.yaw;
+  }
+  state.facingDirty = true;
 }
 
 function onPointerLockChange() {

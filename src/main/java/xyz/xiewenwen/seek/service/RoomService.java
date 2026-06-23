@@ -269,7 +269,7 @@ public class RoomService {
 		}
 	}
 
-	public synchronized void movePlayer(GameRoom room, String playerId, double x, double y) {
+	public synchronized void movePlayer(GameRoom room, String playerId, Double x, Double y, Double height, Double yaw) {
 		Player player = room.findPlayer(playerId);
 		if (player == null) {
 			return;
@@ -292,8 +292,16 @@ public class RoomService {
 			return;
 		}
 		double radius = GameRoom.PLAYER_RADIUS;
-		player.setX(clamp(x, radius, GameRoom.CANVAS_WIDTH - radius));
-		player.setY(clamp(y, radius, GameRoom.CANVAS_HEIGHT - radius));
+		if (x != null && y != null) {
+			player.setX(clamp(x, radius, GameRoom.CANVAS_WIDTH - radius));
+			player.setY(clamp(y, radius, GameRoom.CANVAS_HEIGHT - radius));
+		}
+		if (height != null) {
+			player.setHeight(clamp(height, 0, GameRoom.MAX_PLAYER_HEIGHT));
+		}
+		if (yaw != null) {
+			player.setYaw(yaw);
+		}
 	}
 
 	public synchronized void camouflagePlayer(GameRoom room, String playerId, String color, String disguise) {
@@ -439,6 +447,8 @@ public class RoomService {
 		double radius = GameRoom.PLAYER_RADIUS;
 		player.setX(radius + random.nextDouble() * (GameRoom.CANVAS_WIDTH - radius * 2));
 		player.setY(radius + random.nextDouble() * (GameRoom.CANVAS_HEIGHT - radius * 2));
+		player.setHeight(0);
+		player.setYaw(0);
 	}
 
 	private String generateRoomCode() {

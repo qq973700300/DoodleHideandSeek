@@ -7,6 +7,8 @@ public class Player {
 	private PlayerRole role = PlayerRole.HIDER;
 	private double x = 400;
 	private double y = 300;
+	private double height;
+	private double yaw;
 	private String color = "#FFFFFF";
 	private String disguise;
 	private boolean found;
@@ -66,6 +68,22 @@ public class Player {
 
 	public void setY(double y) {
 		this.y = y;
+	}
+
+	public double getHeight() {
+		return height;
+	}
+
+	public void setHeight(double height) {
+		this.height = height;
+	}
+
+	public double getYaw() {
+		return yaw;
+	}
+
+	public void setYaw(double yaw) {
+		this.yaw = yaw;
 	}
 
 	public String getColor() {

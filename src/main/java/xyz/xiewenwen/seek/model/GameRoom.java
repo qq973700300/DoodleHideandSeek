@@ -10,6 +10,7 @@ public class GameRoom {
 	public static final int HIDING_SECONDS = 20;
 	public static final int SEEKING_SECONDS = 60;
 	public static final double PLAYER_RADIUS = 22;
+	public static final double MAX_PLAYER_HEIGHT = 2.0;
 
 	private String id;
 	private String hostId;

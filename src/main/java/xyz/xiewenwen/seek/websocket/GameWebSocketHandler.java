@@ -199,10 +199,19 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 
 	private void handleMove(WebSocketSession session, GameMessage message) throws IOException {
 		GameRoom room = requireRoom(session, message.getRoomId());
-		if (room == null || message.getX() == null || message.getY() == null) {
+		if (room == null) {
 			return;
 		}
-		roomService.movePlayer(room, message.getPlayerId(), message.getX(), message.getY());
+		if (message.getX() == null && message.getY() == null && message.getHeight() == null && message.getYaw() == null) {
+			return;
+		}
+		roomService.movePlayer(
+				room,
+				message.getPlayerId(),
+				message.getX(),
+				message.getY(),
+				message.getHeight(),
+				message.getYaw());
 		broadcastRoom(room);
 	}
 
