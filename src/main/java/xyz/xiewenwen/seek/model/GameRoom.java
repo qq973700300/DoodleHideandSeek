@@ -11,6 +11,8 @@ public class GameRoom {
 	public static final int SEEKING_SECONDS = 60;
 	public static final double PLAYER_RADIUS = 22;
 	public static final double MAX_PLAYER_HEIGHT = 2.0;
+	public static final double SEEKER_WAIT_X = 22;
+	public static final double SEEKER_WAIT_Y = 22;
 
 	private String id;
 	private String hostId;

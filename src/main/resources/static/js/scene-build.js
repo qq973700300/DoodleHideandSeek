@@ -554,3 +554,38 @@ export function buildEnvironment(scene, addProp, addPropGroup, ROOM_W, ROOM_D) {
     scene.add(cloud);
   });
 }
+
+export function buildSeekerWaitingRoom() {
+  const room = new THREE.Group();
+  const floorMat = mat(0x6b5b4f, { roughness: 0.92 });
+  const wallMat = mat(0x8b7d6b, { roughness: 0.88 });
+  const trimMat = mat(0x4a4035);
+  const lampMat = mat(0xfff3d6, { emissive: 0xfff0cc, emissiveIntensity: 0.35 });
+
+  room.add(mesh(new THREE.PlaneGeometry(14, 14), floorMat, 0, 0, 0, -Math.PI / 2, 0, 0));
+  room.add(mesh(new THREE.BoxGeometry(14, 4.2, 0.35), wallMat, 0, 2.1, -7));
+  room.add(mesh(new THREE.BoxGeometry(14, 4.2, 0.35), wallMat, 0, 2.1, 7));
+  room.add(mesh(new THREE.BoxGeometry(0.35, 4.2, 14), wallMat, -7, 2.1, 0));
+  room.add(mesh(new THREE.BoxGeometry(0.35, 4.2, 14), wallMat, 7, 2.1, 0));
+  room.add(mesh(new THREE.BoxGeometry(14.4, 0.25, 14.4), trimMat, 0, 4.2, 0));
+
+  const bench = new THREE.Group();
+  bench.add(mesh(new THREE.BoxGeometry(3.2, 0.18, 1.1), mat(0x5c4033), 0, 0.55, 0));
+  bench.add(mesh(new THREE.BoxGeometry(3.2, 0.55, 0.16), mat(0x5c4033), 0, 0.95, -0.42));
+  bench.add(mesh(new THREE.BoxGeometry(0.16, 0.55, 1.1), mat(0x5c4033), -1.45, 0.28, 0));
+  bench.add(mesh(new THREE.BoxGeometry(0.16, 0.55, 1.1), mat(0x5c4033), 1.45, 0.28, 0));
+  bench.position.set(-2.2, 0, 2.4);
+  room.add(bench);
+
+  const lamp = new THREE.Group();
+  lamp.add(mesh(new THREE.CylinderGeometry(0.08, 0.12, 0.35, 8), mat(0x444444, { metalness: 0.5 }), 0, 3.85, 0));
+  lamp.add(mesh(new THREE.SphereGeometry(0.45, 10, 10), lampMat, 0, 3.45, 0));
+  lamp.position.set(0, 0, -4.5);
+  room.add(lamp);
+
+  const poster = mesh(new THREE.PlaneGeometry(4.2, 1.4), mat(0x3d5a80), 0, 2.2, -6.82);
+  room.add(poster);
+
+  room.position.set(200, 0, 0);
+  return room;
+}

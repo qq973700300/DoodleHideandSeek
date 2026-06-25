@@ -1,6 +1,7 @@
 package xyz.xiewenwen.seek.service;
 
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -125,14 +126,59 @@ public class RoomService {
 	}
 
 	public RoomSnapshot toSnapshot(GameRoom room) {
+		return toSnapshot(room, null);
+	}
+
+	public RoomSnapshot toSnapshot(GameRoom room, String viewerPlayerId) {
 		RoomSnapshot snapshot = new RoomSnapshot();
 		snapshot.setRoomId(room.getId());
 		snapshot.setPhase(room.getPhase());
 		snapshot.setRound(room.getRound());
 		snapshot.setSeekerId(room.getSeekerId());
 		snapshot.setPhaseRemainingMs(room.getPhaseRemainingMs());
-		snapshot.setPlayers(new ArrayList<>(room.getPlayers()));
+		snapshot.setPlayers(buildPlayerListForViewer(room, viewerPlayerId));
 		return snapshot;
+	}
+
+	private List<Player> buildPlayerListForViewer(GameRoom room, String viewerPlayerId) {
+		List<Player> players = new ArrayList<>();
+		boolean hidingPhase = room.getPhase() == GamePhase.HIDING;
+		boolean viewerIsSeeker = hidingPhase
+				&& viewerPlayerId != null
+				&& viewerPlayerId.equals(room.getSeekerId());
+		for (Player player : room.getPlayers()) {
+			if (viewerIsSeeker && player.getRole() == PlayerRole.HIDER) {
+				players.add(copyPlayerSummary(player));
+			} else if (hidingPhase && player.getRole() == PlayerRole.SEEKER) {
+				players.add(copyPlayerSummary(player));
+			} else {
+				players.add(copyPlayerFull(player));
+			}
+		}
+		return players;
+	}
+
+	private Player copyPlayerSummary(Player source) {
+		Player player = new Player();
+		player.setId(source.getId());
+		player.setName(source.getName());
+		player.setRole(source.getRole());
+		player.setHost(source.isHost());
+		player.setReady(source.isReady());
+		player.setEntered(source.isEntered());
+		player.setFound(source.isFound());
+		return player;
+	}
+
+	private Player copyPlayerFull(Player source) {
+		Player player = copyPlayerSummary(source);
+		player.setX(source.getX());
+		player.setY(source.getY());
+		player.setHeight(source.getHeight());
+		player.setYaw(source.getYaw());
+		player.setColor(source.getColor());
+		player.setDisguise(source.getDisguise());
+		return player;
 	}
 
 	public synchronized void startGame(GameRoom room, String requesterId) {
@@ -404,16 +450,18 @@ public class RoomService {
 		for (Player player : room.getPlayers()) {
 			player.setFound(false);
 			player.setColor("#FFFFFF");
-			player.setDisguise(null);
 			player.setEntered(true);
 			if (!player.isHost()) {
 				player.setReady(false);
 			}
-			spawnPlayer(player);
 			if (player.getId().equals(seeker.getId())) {
 				player.setRole(PlayerRole.SEEKER);
+				player.setDisguise(null);
+				spawnSeekerWaiting(player);
 			} else {
 				player.setRole(PlayerRole.HIDER);
+				assignRandomDisguise(player);
+				spawnPlayer(player);
 			}
 		}
 		room.setPhase(GamePhase.HIDING);
@@ -436,6 +484,10 @@ public class RoomService {
 	private void enterSeeking(GameRoom room) {
 		room.setPhase(GamePhase.SEEKING);
 		room.setPhaseEndsAt(System.currentTimeMillis() + GameRoom.SEEKING_SECONDS * 1000L);
+		Player seeker = room.findPlayer(room.getSeekerId());
+		if (seeker != null) {
+			spawnPlayer(seeker);
+		}
 	}
 
 	private boolean allHidersFound(GameRoom room) {
@@ -447,6 +499,13 @@ public class RoomService {
 		double radius = GameRoom.PLAYER_RADIUS;
 		player.setX(radius + random.nextDouble() * (GameRoom.CANVAS_WIDTH - radius * 2));
 		player.setY(radius + random.nextDouble() * (GameRoom.CANVAS_HEIGHT - radius * 2));
+		player.setHeight(0);
+		player.setYaw(0);
+	}
+
+	private void spawnSeekerWaiting(Player player) {
+		player.setX(GameRoom.SEEKER_WAIT_X);
+		player.setY(GameRoom.SEEKER_WAIT_Y);
 		player.setHeight(0);
 		player.setYaw(0);
 	}
@@ -473,12 +532,16 @@ public class RoomService {
 		return Math.max(min, Math.min(max, value));
 	}
 
-	private static final Set<String> ALLOWED_DISGUISES = Set.of(
+	private static final List<String> ALLOWED_DISGUISES = Arrays.asList(
 			"pine_tree", "round_tree", "bush", "rock_cluster",
 			"crate", "barrel", "hay_bale", "picnic_table", "park_bench",
 			"shed", "gazebo", "fountain", "playground_slide", "sandbox", "bus_stop",
 			"car", "sofa", "bookshelf", "flower_bed", "sign_post",
 			"low_wall", "colored_block", "fence", "lamp_post");
+
+	private void assignRandomDisguise(Player player) {
+		player.setDisguise(ALLOWED_DISGUISES.get(random.nextInt(ALLOWED_DISGUISES.size())));
+	}
 
 	private boolean isAllowedDisguise(String disguise) {
 		return ALLOWED_DISGUISES.contains(disguise);

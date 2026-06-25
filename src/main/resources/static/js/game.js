@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { buildEnvironment } from './scene-build.js';
+import { buildEnvironment, buildSeekerWaitingRoom } from './scene-build.js';
 import { DISGUISE_NAMES, DISGUISE_COLLISION, resolvePropType, sampleMeshColor } from './scene-build.js';
 import { createHumanoid, createDisguiseVisual, getHumanoidVariant } from './player-models.js';
 
@@ -17,6 +17,7 @@ const JUMP_VELOCITY = 5.2;
 const GRAVITY = 18;
 const MAX_JUMP_HEIGHT = 1.6;
 const MOVE_SEND_MS = 50;
+const SEEKER_WAIT_WORLD = { x: 200, y: 0, z: 0 };
 const LOBBY_SPEED = 5.6;
 const HIDER_HIDE_SPEED = 5.6;
 const HIDER_SEEK_SPEED = 2.0;
@@ -77,6 +78,8 @@ let scene;
 let camera;
 let renderer;
 let raycaster;
+let mainWorldGroup;
+let seekerWaitGroup;
 let playerMeshes = new Map();
 let pickableMeshes = [];
 let propCollisionBoxes = [];
@@ -398,6 +401,11 @@ function isSeekerFirstPerson() {
   return !!(me && me.role === 'SEEKER' && state.snapshot?.phase === 'SEEKING');
 }
 
+function isSeekerWaiting() {
+  const me = getMe();
+  return !!(me && me.role === 'SEEKER' && state.snapshot?.phase === 'HIDING');
+}
+
 function isThirdPerson() {
   const me = getMe();
   if (!me || !state.snapshot) return false;
@@ -408,6 +416,12 @@ function isThirdPerson() {
 
 function canControlCamera() {
   return isSeekerFirstPerson() || isThirdPerson();
+}
+
+function updateSeekerWaitingHint() {
+  if (!isSeekerWaiting()) return;
+  const remaining = state.snapshot?.phaseRemainingMs ?? 0;
+  hintBar.textContent = `等候室：躲藏者正在伪装，请等待 ${Math.ceil(remaining / 1000) || 0} 秒`;
 }
 
 function allPlayersReady() {
@@ -487,13 +501,16 @@ function updateUi() {
       hintBar.textContent = state.isHost
         ? (canStart ? '全员已进入并准备，可以开始游戏' : '等待所有玩家进入并准备')
         : (me.ready ? '已准备，等待其他玩家和房主开始' : '请点击准备');
+    } else if (isSeekerWaiting()) {
+      hintBar.textContent = `等候室：躲藏者正在伪装，请等待 ${Math.ceil(snapshot.phaseRemainingMs / 1000) || 0} 秒`;
+      exitPointerLock();
     } else if (isSeekerFirstPerson()) {
       hintBar.textContent = state.pointerLocked
         ? '第一人称猎人：WASD 移动，空格跳跃，左键射击'
         : '点击画面锁定鼠标';
     } else if (me.role === 'HIDER' && snapshot.phase === 'HIDING') {
       hintBar.textContent = state.pointerLocked
-        ? '第三人称躲藏：WASD 移动，空格跳跃，E 伪装成瞄准的道具'
+        ? '第三人称躲藏：WASD 移动，空格跳跃，E 切换伪装道具'
         : '点击画面锁定鼠标';
     } else if (me.role === 'HIDER' && snapshot.phase === 'SEEKING') {
       hintBar.textContent = '保持伪装，别被猎人发现';
@@ -507,6 +524,21 @@ function updateUi() {
 
   renderPlayerList(snapshot, me);
   updateGunVisibility();
+  updateSceneVisibility();
+}
+
+function updateSceneVisibility() {
+  if (!mainWorldGroup || !seekerWaitGroup) return;
+  const waiting = isSeekerWaiting();
+  mainWorldGroup.visible = !waiting;
+  seekerWaitGroup.visible = waiting;
+  if (waiting) {
+    scene.fog.far = 42;
+    scene.background = new THREE.Color(0x2f3440);
+  } else {
+    scene.fog.far = 220;
+    scene.background = new THREE.Color(0x9fd4ff);
+  }
 }
 
 function updateTimerLabel() {
@@ -515,6 +547,7 @@ function updateTimerLabel() {
   timerLabel.textContent = snapshot.phaseRemainingMs > 0
     ? `${Math.ceil(snapshot.phaseRemainingMs / 1000)} 秒`
     : '';
+  updateSeekerWaitingHint();
 }
 
 function renderPlayerList(snapshot, me) {
@@ -620,7 +653,7 @@ function addLights() {
 function addProp(mesh, pickable = true) {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
-  scene.add(mesh);
+  mainWorldGroup.add(mesh);
   if (pickable) pickableMeshes.push(mesh);
 }
 
@@ -632,7 +665,7 @@ function addPropGroup(group, pickable = true) {
       if (pickable) pickableMeshes.push(child);
     }
   });
-  scene.add(group);
+  mainWorldGroup.add(group);
   registerPropCollision(group);
 }
 
@@ -763,6 +796,18 @@ function shouldShowAvatarFacing(player) {
     return isThirdPerson();
   }
   if (state.snapshot.phase === 'LOBBY' && !player.entered) return false;
+  if (state.snapshot.phase === 'HIDING' && player.role === 'SEEKER') return false;
+  if (isGameplay() && player.role === 'HIDER' && player.found) return false;
+  return true;
+}
+
+function shouldRenderPlayer(player) {
+  if (!state.snapshot) return false;
+  if (state.snapshot.phase === 'LOBBY' && !player.entered) return false;
+  if (state.snapshot.phase === 'HIDING') {
+    if (player.role === 'SEEKER') return false;
+    if (isSeekerWaiting()) return false;
+  }
   if (isGameplay() && player.role === 'HIDER' && player.found) return false;
   return true;
 }
@@ -831,8 +876,13 @@ function updateJumpPhysics(dt) {
 }
 
 function buildRoom() {
+  mainWorldGroup = new THREE.Group();
+  scene.add(mainWorldGroup);
   propCollisionBoxes = [];
-  buildEnvironment(scene, addProp, addPropGroup, ROOM_W, ROOM_D);
+  buildEnvironment(mainWorldGroup, addProp, addPropGroup, ROOM_W, ROOM_D);
+  seekerWaitGroup = buildSeekerWaitingRoom();
+  seekerWaitGroup.visible = false;
+  scene.add(seekerWaitGroup);
 }
 
 function worldToBackend(x, z) {
@@ -914,8 +964,7 @@ function syncPlayerMeshes() {
 
   const visibleIds = new Set();
   state.snapshot.players.forEach((player) => {
-    if (isGameplay() && player.role === 'HIDER' && player.found) return;
-    if (state.snapshot.phase === 'LOBBY' && !player.entered) return;
+    if (!shouldRenderPlayer(player)) return;
 
     visibleIds.add(player.id);
     let root = playerMeshes.get(player.id);
@@ -962,6 +1011,12 @@ function updatePreviewCamera() {
   camera.lookAt(0, 1.5, 0);
 }
 
+function updateSeekerWaitingCamera() {
+  camera.position.set(SEEKER_WAIT_WORLD.x, EYE_HEIGHT, SEEKER_WAIT_WORLD.z + 2.2);
+  camera.rotation.y = Math.PI;
+  camera.rotation.x = -0.08;
+}
+
 function updateFirstPersonCamera() {
   const me = getMe();
   if (!me) return;
@@ -1002,6 +1057,8 @@ function animate() {
   const me = getMe();
   if (state.snapshot?.phase === 'LOBBY' && me && !me.entered) {
     updatePreviewCamera();
+  } else if (isSeekerWaiting()) {
+    updateSeekerWaitingCamera();
   } else if (isSeekerFirstPerson()) {
     updateFirstPersonCamera();
   } else if (isThirdPerson()) {

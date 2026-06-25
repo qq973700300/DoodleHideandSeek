@@ -167,7 +167,7 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 		session.getAttributes().put(ATTR_ROOM_ID, room.getId());
 		session.getAttributes().put(ATTR_PLAYER_ID, message.getPlayerId());
 		session.getAttributes().remove(ATTR_LEFT);
-		send(session, envelope("JOINED", roomService.toSnapshot(room)));
+		send(session, envelope("JOINED", roomService.toSnapshot(room, message.getPlayerId())));
 		broadcastRoom(room);
 	}
 
@@ -332,8 +332,15 @@ public class GameWebSocketHandler extends TextWebSocketHandler {
 	}
 
 	private void broadcastRoom(GameRoom room) throws IOException {
-		RoomSnapshot snapshot = roomService.toSnapshot(room);
-		broadcast(room, envelope("ROOM_STATE", snapshot));
+		for (WebSocketSession session : sessions.values()) {
+			String boundRoomId = roomService.getRoomIdForSession(session.getId());
+			if (boundRoomId == null || !boundRoomId.equals(room.getId()) || !session.isOpen()) {
+				continue;
+			}
+			String playerId = roomService.getPlayerIdForSession(session.getId());
+			RoomSnapshot snapshot = roomService.toSnapshot(room, playerId);
+			send(session, envelope("ROOM_STATE", snapshot));
+		}
 	}
 
 	private void broadcast(GameRoom room, String payload) throws IOException {
